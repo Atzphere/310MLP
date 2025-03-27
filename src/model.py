@@ -1,48 +1,51 @@
-import keras
 import tensorflow as tf
+import tf_keras as keras
+import tqdm.keras
 
 
-class MLP(keras.Model):
-    def __init__(self, n_inputs, layers, output_func):
+class ReduceRegressor(keras.Model):
+    '''
+    Dynamic-topography neural network which takes a ragged input tensor
+    of shape (N_instances, None, N_features), passes N_subinstances (the ragged dimension)
+    to a subnet, and then reduces the result to a tensor with label-like dimension.
+    The same subnet is used for each individual subinstance forward pass.
+    '''
+
+    def __init__(self, subnet, reduction_func, reduction_params=None):
         super().__init__()
+        self.subnet = subnet
+        self.reduction_func = reduction_func
+        self.reduction_params = reduction_params
 
-        # subnetwork used to evaluate atomic potential contributions, evaluated for each atom in a structure.
-        self.subnet = keras.Sequential(layers=[
-            keras.Input(shape=(n_inputs,))]  # input layer takes in n_inputs number of symmetry function features
-            + layers  # hidden layers
-            + [keras.layers.Dense(1, activation=output_func)])  # output layer returns individual energy contributions
-
-        self.num_features = n_inputs
+    def get_subnet(self):
+        return self.subnet
 
     def call(self, inputs, training=False):
-        '''
-        feed-forward method for the model
-        should have the signature we ultimately want the model to have,
-        i.e. for one structure: Tensor[StructureFeatures] -> Energy_total
 
-        which then for multiple structures:
-            Tensor[Tensor[StructureFeatures]] -> Tensor[Energy_total]
+        def _process_subinstance(struct):
+            return self.subnet(struct, training=training)
 
-        wherein in reality the outermost Tensor is just a list.
+        pairwise_contribs = tf.map_fn(
+            _process_subinstance, inputs, fn_output_signature=tf.RaggedTensorSpec(ragged_rank=0))
 
-        inputs: shape (num_atoms, num_features) tensor
-        '''
+        return self.reduction_func(pairwise_contribs, **self.reduction_params)
 
-        #  subnet.call(Tensor[StructureFeatures]) -> Tensor[EnergyContributions]
+        def fit(self, *args, **kwargs):
+            '''
+            Boilerplate fit with fancy progress bar.
+            '''
+            if "callbacks" not in kwargs or kwargs["callbacks"] is None:
+                kwargs["callbacks"] = [tqdm.keras.TqdmCallback()]
+            else:
+                kwargs["callbacks"].append(tqdm.keras.TqdmCallback())
+            return super().fit(*args, **kwargs)
 
-        #  we call the subnet on each atom in a structure individually.
-        #  first, split the input tensor into individual structures:
 
-        structure_energies = []
-
-        for struct in inputs:
-            atom_contributions = self.subnet(struct, training=training)
-            structure_energies.append(tf.reduce_sum(atom_contributions))
-
-        return structure_energies
-        # for structure in inputs:
-        #     atom_contributions = self.subnet(structure, training=training)
-        #     structure_energy = tf.reduce_sum(atom_contributions)
-        #     structure_energies.append(structure_energy)
-
-        # return structure_energies
+class MLPNet(ReduceRegressor):
+    def __init__(self, layers, n_syms):
+        subnet = keras.Sequential(layers=[
+            keras.Input(shape=(n_syms,))]  # input layer takes in n_inputs number of symmetry function features
+            + layers
+            + [keras.layers.Dense(1, activation="linear")])
+        super().__init__(subnet=subnet, reduction_func=tf.reduce_sum,
+                         reduction_params={"axis": 1})

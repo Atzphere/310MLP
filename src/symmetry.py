@@ -238,7 +238,7 @@ def get_features(structure, radfunc, angfunc, Rc, params_rad, params_ang):
         feature_vector = np.concatenate([radial_features, angular_features])
         features.append(feature_vector)
 
-    return features
+    return np.array(features)
 
 
 def behler_features(structure, Rc, params_rad, params_ang):
