@@ -118,19 +118,11 @@ def cull_angular_interaction_set(i_set, Rc):
     return (target, ns1[valid], nl1[valid], ns2[valid], nl2[valid])
 
 
-def get_radial_fingerprint(interaction, params):
-    pass
-
-
-def get_fingerprint_vector():
-    pass
-
-
-def behler_rad(target_pos, neighbor_locs, Rs, eta):
+def behler_rad(target_pos, neighbor_locs, Rs=0, eta=0):
     return np.exp(-eta * (eucl_dist(target_pos, neighbor_locs) - Rs)**2)
 
 
-def behler_ang(target_pos, n1_locs, n2_locs, Rs, eta, zeta, lmbda):
+def behler_ang(target_pos, n1_locs, n2_locs, Rs=0, eta=0, zeta=0, lmbda=0):
     Rij = target_pos - n1_locs
     Rik = target_pos - n2_locs
     Rjk = n1_locs - n2_locs
@@ -167,7 +159,7 @@ def get_radial_funcs(i_set, Rc, radfunc=behler_rad, params={}):
         # supports multiple symmetry functions per species
 
         for paramset in func_params:
-            terms = radfunc(target_pos, atom_locs, *paramset) * fc[filt]
+            terms = radfunc(target_pos, atom_locs, **paramset) * fc[filt]
             output_features.append(np.sum(terms))
 
     return np.array(output_features)
@@ -209,7 +201,7 @@ def get_angular_funcs(i_set, Rc, angfunc=behler_ang, params={}):
         # supports multiple symmetry functions per species
 
         for paramset in func_params:
-            terms = angfunc(target_pos, al1, al2, *paramset) * fc[filt]
+            terms = angfunc(target_pos, al1, al2, **paramset) * fc[filt]
             output_features.append(np.sum(terms))
 
     return np.array(output_features)
@@ -221,9 +213,11 @@ def get_features(structure, radfunc, angfunc, Rc, params_rad, params_ang):
     '''
 
     # get cutoff-culled sets of interactions for every atom in the structure
-    radial_interaction_sets = [cull_radial_interaction_set(iset, Rc=Rc) for iset in get_radial_interaction_sets(structure)]
+    radial_interaction_sets = [cull_radial_interaction_set(
+        iset, Rc=Rc) for iset in get_radial_interaction_sets(structure)]
 
-    angular_interaction_sets = [cull_angular_interaction_set(iset, Rc=Rc) for iset in get_angular_interaction_sets(structure)]
+    angular_interaction_sets = [cull_angular_interaction_set(
+        iset, Rc=Rc) for iset in get_angular_interaction_sets(structure)]
 
     atoms = zip(radial_interaction_sets, angular_interaction_sets)
 
@@ -249,3 +243,56 @@ def behler_features(structure, Rc, params_rad, params_ang):
 
     return get_features(structure, radfunc=behler_rad, angfunc=behler_ang,
                         Rc=Rc, params_rad=params_rad, params_ang=params_ang)
+
+
+# class MLPParams(object):
+#     def __init__(self, Rc, rad_params, ang_params, global_Rs=None):
+#         self.Rc = Rc
+#         if global_Rs:
+#             self.global_Rs = global_Rs
+#         self.rad_species = list(rad_params.keys())
+#         self.ang_species = list(ang_params.keys())
+
+# class SpeciesCollection(object):
+
+
+# class Species(object):
+#     '''
+#     overloading specifications:
+
+#     Non-ordered but NOT a set:
+#     Symbol([A, B]) == Symbol([B, A])
+#     Symbol([A, A]) != Symbol([A])
+
+#     Commutation under multiplication:
+#     A * B == B * A == Symbol([A, B])
+
+#     Commutation under addition (with an auxiliary object)
+#     A + B == B + A == SymbolCollection([A, B])
+
+#     Distributive property
+#     A * (A + B) == SymbolCollection([A * A, A * B]) == SymbolCollection(Symbol([A, A]), Symbol([A, B]))
+
+#     Associativity:
+#     A * B * C == (A * B) * C == A * (B * C)
+
+#     More distributive property:
+
+#     (A + B) * (C + D) == SymbolCollection([A * C, A * D, B * C, B * D])
+
+
+#     attributes:
+#     constituent atoms (as a set?)
+#     order: how many atoms are in the
+#     '''
+
+#     def __init__(self, species):
+#         if isinstance(species, Iterable):
+#             self.species = Counter(species)
+#         else:
+#             self.species = Counter([species])
+
+#     def __mul__(self, other):
+#         return Species([self, other])
+
+#     def __add__(self, other):
