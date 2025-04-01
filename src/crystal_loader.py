@@ -5,8 +5,30 @@ import numpy as np
 import multiprocess as mp
 import os
 import symmetry
+import pathlib
+import h5py
 # from multiprocess import Pool
 
+def load_dset(dir_path, name, features_path=None, labels_path=None):
+    '''
+    the latter 2 kwargs are overrides to specify explicit paths for both
+    '''
+    if labels_path and features_path:
+        lpath = labels_path
+        fpath = features_path
+    elif (labels_path and features_path) and labels_path != features_path:
+        raise ValueError("features_path and labels_path must both be supplied or absent")
+    else:
+        dir_path = pathlib.Path(dir_path)
+        fpath = dir_path / f"{name}_features.h5"
+        lpath = dir_path / f"{name}_labels.h5"
+    with h5py.File(fpath, "r") as f:
+        features = [f[f"array_{i}"][:] for i in range(len(f))]
+
+    with h5py.File(lpath, "r") as f:
+        labels = [f[f"array_{i}"][:] for i in range(len(f))]
+
+    return features, labels
 
 def load_crystal(fname):
     '''
