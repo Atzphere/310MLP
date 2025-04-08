@@ -167,24 +167,30 @@ class ReduceRegressor(keras.Model):
             if (y is not None):
                 # build a training dataset with y included
                 def __gen():
-                    if sample_weight:
+                    if sample_weight is not None:
                         for features, label, length, weights in zip(X, y, sequence_lengths, sample_weight):
                             yield (features, np.ones((features.shape[0], 1)), [length]), label, weights
                     else:
-                        for features, label, length in zip(X, y, sequence_lengths,):
+                        for features, label, length in zip(X, y, sequence_lengths):
                             yield (features, np.ones((features.shape[0], 1)), [length]), label
+                if sample_weight is not None:
+                    sample_weight_spec = (tf.TensorSpec(shape=(1,), dtype=tf.float32),)
+                    sample_weight_shape = (1,)
+                else:
+                    sample_weight_spec = ()
+                    sample_weight_shape = ()
 
                 signature = ((tf.TensorSpec(shape=(None, self.N_features), dtype=tf.float32),  # features
                               # masks (passed as a part of "Xtrain" to call())
                               tf.TensorSpec(shape=(None, 1),
                                             dtype=tf.float32),
                               tf.TensorSpec(shape=(1,), dtype=tf.int32)),  # instance lengths for unstacking batched arrays
-                             tf.TensorSpec(shape=(1,), dtype=tf.float32))  # labels
+                             tf.TensorSpec(shape=(1,), dtype=tf.float32)) + sample_weight_spec  # labels and weights
 
                 paddedshapes = (((None, self.N_features),  # features
                                  (None, 1),  # masks
                                  (1,)),  # spans
-                                (1,))  # labels
+                                (1,)) + sample_weight_shape  # labels and weights
 
             elif (X is not None) and y is None:
                 # build prediction dataset with just x and aux. features.

@@ -2,38 +2,103 @@ import numpy as np
 import itertools
 import pandas as pd
 
+'''
+TODO: Unit cell compensation
 
-def get_radial_interaction_sets(structure):
+We are trying to generate symmetry functions that represent a 
+
+There is a problem however: consider two different atoms A1 and B1 on opposite sides of the unit cell 1.
+While A1 and B1 might interact, the interaction is likely weaker than say A1 with B-1, which is still a 
+
+
+'''
+
+def correct_closest_atoms(target_loc, neighbor_locations, COB, COB_inv):
+    '''
+    If a given atom is more than half a lattice a vector
+    away from the target atom, that means there is an instance
+    of that atom in an adjacent unit cell which is closer to the
+    target. This helper function adjusts these when needed.
+
+    target_loc: ndarray
+        Row vector representing a target atom's location
+
+    neighbor_locations ndarray:
+        N x 3 array of row vectors representing the location of
+        each neighboring atom.
+
+    COB ndarray:
+        Transposed change-of-basis matrix to switch to the
+        basis of a structure's  mitive lattice vectors.
+        Transposed to handle row vector arrays.
+
+    COB_inv:
+        matrix to switch back. provided rather than obtained from COB
+        to avoid re-computation.
+    '''
+
+    # tranposed change of basis matrix to re-express distances in terms of PLVs.
+
+    deltas = neighbor_locations - target_loc
+
+    # convert to lattice basis
+    lattice_deltas = deltas @ COB
+
+    # True when a given atom is closer to our target in a different unit cell
+    exceed_filt = np.abs(lattice_deltas) > 0.5
+
+    # correct deltas by moving by one lattice vector in the
+    # direction that minimizes distance (pick an adjacent unit cell)
+    corrections = -(exceed_filt * np.sign(lattice_deltas))
+    lattice_deltas += corrections
+
+    # convert to original basis, add to target_loc
+    # to get corrected positions
+    corrections = lattice_deltas @ COB_inv
+
+    corrected_locs = target_loc + corrections
+
+    return corrected_locs
+
+
+def get_radial_interaction_sets(structure, lattice_vectors):
     struct_array = structure.to_numpy()
     species = struct_array[:, 0]
     coordinates = struct_array[:, 1:].astype("float")
+
     pairs = list(itertools.permutations(zip(species, coordinates), 2))
+
+    # in the case a diatomic structure, this yields 1
     window = len(structure) - 1
 
     radial_interaction_sets = []
 
+    COB_matrix = np.linalg.inv(lattice_vectors)
+
     for i in range(len(structure)):
-        neighbor_species = []
-        neighbors = []
 
         interval_start = window * i
         interval_end = interval_start + window
         interactions = pairs[interval_start: interval_end]
 
+
         target_atom = interactions[0][0]
+        target_loc = target_atom[1]
         neighbor_species, neighbor_locations = zip(
             *[interaction[1] for interaction in interactions])
-
+        # neighbor species is the types (e.g. Ti, O) of the atom's neighbors
         neighbor_species = np.array(neighbor_species)
         neighbor_locations = np.array(neighbor_locations)
 
+        corrected_locs = correct_closest_atoms(target_loc, neighbor_locations, COB_matrix, lattice_vectors)
+
         radial_interaction_sets.append(
-            (target_atom, neighbor_species, neighbor_locations))
+            (target_atom, neighbor_species, corrected_locs))
 
     return radial_interaction_sets
 
 
-def get_angular_interaction_sets(structure):
+def get_angular_interaction_sets(structure, lattice_vectors):
     struct_array = structure.to_numpy()
     species = struct_array[:, 0]
     coordinates = struct_array[:, 1:].astype("float")
@@ -42,15 +107,16 @@ def get_angular_interaction_sets(structure):
 
     angular_interaction_sets = []
 
+    COB_matrix = np.linalg.inv(lattice_vectors)
+
     for i in range(len(structure)):
-        neighbor_species = []
-        neighbors = []
 
         interval_start = window * i
         interval_end = interval_start + window
         interactions = triplets[interval_start: interval_end]
 
         target_atom = interactions[0][0]
+        target_loc = target_atom[1]
 
         neighbors1, neighbors2 = zip(
             *[interaction[1:] for interaction in interactions])
@@ -63,7 +129,10 @@ def get_angular_interaction_sets(structure):
         nl1 = np.array(nl1)
         nl2 = np.array(nl2)
 
-        angular_interaction_sets.append((target_atom, ns1, nl1, ns2, nl2))
+        nl1_cor = correct_closest_atoms(target_loc, nl1, COB_matrix, lattice_vectors)
+        nl2_cor = correct_closest_atoms(target_loc, nl2, COB_matrix, lattice_vectors)
+
+        angular_interaction_sets.append((target_atom, ns1, nl1_cor, ns2, nl2_cor))
 
     return angular_interaction_sets
 
@@ -207,17 +276,17 @@ def get_angular_funcs(i_set, Rc, angfunc=behler_ang, params={}):
     return np.array(output_features)
 
 
-def get_features(structure, radfunc, angfunc, Rc, params_rad, params_ang):
+def get_features(structure, lattice_vectors, radfunc, angfunc, Rc, params_rad, params_ang):
     '''
     Generates symmetry function features for a particular structure file.
     '''
 
     # get cutoff-culled sets of interactions for every atom in the structure
     radial_interaction_sets = [cull_radial_interaction_set(
-        iset, Rc=Rc) for iset in get_radial_interaction_sets(structure)]
+        iset, Rc=Rc) for iset in get_radial_interaction_sets(structure, lattice_vectors)]
 
     angular_interaction_sets = [cull_angular_interaction_set(
-        iset, Rc=Rc) for iset in get_angular_interaction_sets(structure)]
+        iset, Rc=Rc) for iset in get_angular_interaction_sets(structure, lattice_vectors)]
 
     atoms = zip(radial_interaction_sets, angular_interaction_sets)
 
@@ -235,13 +304,13 @@ def get_features(structure, radfunc, angfunc, Rc, params_rad, params_ang):
     return np.array(features)
 
 
-def behler_features(structure, Rc, params_rad, params_ang):
+def behler_features(structure, LV, Rc, params_rad, params_ang):
     '''
     Generates symmetry function features based off of the method detailed
     in Behler and Parrinello 2007 for a given structure.
     '''
 
-    return get_features(structure, radfunc=behler_rad, angfunc=behler_ang,
+    return get_features(structure, LV, radfunc=behler_rad, angfunc=behler_ang,
                         Rc=Rc, params_rad=params_rad, params_ang=params_ang)
 
 
