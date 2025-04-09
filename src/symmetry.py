@@ -152,7 +152,9 @@ def out_of_range(X1, X2, Rc):
 def behler_cutoff(X1, X2, Rc):
     dist = eucl_dist(X1, X2)
     pre = np.zeros_like(dist)
-    pre[dist <= Rc] = 0.5 * (np.cos(np.pi * dist[dist <= Rc] / Rc) + 1)
+
+    assert (len(dist[dist <= Rc]) == len(dist)), "Behler cutoff missed some entries"
+    pre[dist <= Rc] = 0.5 * (np.cos(np.pi * (dist / Rc)) + 1)
     return pre
 
 
@@ -200,9 +202,9 @@ def behler_ang(target_pos, n1_locs, n2_locs, Rs=0, eta=0, zeta=0, lmbda=0):
     len_ik = length(Rik)
     len_jk = length(Rjk)
 
-    theta = np.sum(Rij * Rik, axis=1) / (len_ij * len_ik)
+    cos_theta = np.sum(Rij * Rik, axis=1) / (len_ij * len_ik)
 
-    return 2**(1 - zeta) * (1 + lmbda * np.cos(theta))**zeta * np.exp(-eta * (len_ij**2 + len_ik**2 + len_jk**2))
+    return 2**(1 - zeta) * (1 + lmbda * cos_theta)**zeta * np.exp(-eta * (len_ij**2 + len_ik**2 + len_jk**2))
 
 
 def get_radial_funcs(i_set, Rc, radfunc=behler_rad, params={}):
@@ -216,9 +218,9 @@ def get_radial_funcs(i_set, Rc, radfunc=behler_rad, params={}):
 
     unique_species = set(ns)
 
-    if not (params.keys() >= unique_species):
+    if not (len(params.keys()) >= len(unique_species)):
         raise ValueError(
-            "Parameters were not specified for all interaction types in crystal")
+            "Radial parameters were not specified for all interaction types in crystal")
 
     output_features = []
     for species in params.keys():
@@ -250,23 +252,44 @@ def get_angular_funcs(i_set, Rc, angfunc=behler_ang, params={}):
 
     fc = fcij * fcik * fcjk
 
-    pairs = [tuple(sorted(pair)) for pair in np.vstack([ns1, ns2]).T]
+    # V2: this actually causes undercounting? I believe the actual summation
+    # should include the degeneracy; we do not want to sort the pairs.
+
+    # pairs = [tuple(sorted(pair)) for pair in np.vstack([ns1, ns2]).T]
+
+    pairs = [tuple(pair) for pair in np.vstack([ns1, ns2]).T]
+
     unique_species = set(pairs)
     pairs = np.array(pairs)
 
-    cleaned_param_keys = set([tuple(sorted(pair)) for pair in params.keys()])
+    # this deals with ordering; Ti-O is considered the same as O-Ti
+    # sorting the input params puts them in a canonical order
+    # V2: we actually want to generate get the complementary reversed pair as well
 
-    if not (cleaned_param_keys >= unique_species):
+    expanded_params = params.copy()
+
+    for key in params.keys():
+        rev = tuple(reversed(key))
+        if rev not in expanded_params.keys():
+            expanded_params.update({rev: params[key]})
+
+    cleaned_param_keys = expanded_params.keys()
+
+    # cleaned_param_keys = set([tuple(sorted(pair)) for pair in params.keys()])
+
+    if not unique_species.issubset(expanded_params):
+        # every observed interaction type needs parameters
         raise ValueError(
-            "Parameters were not specified for all interaction types in crystal")
+            "Angular parameters were not specified for all interaction types in crystal")
 
     output_features = []
-    for species, original in zip(cleaned_param_keys, params.keys()):
+
+    for species, original in zip(cleaned_param_keys, expanded_params):
         filt = np.all(pairs == species, axis=-1)
 
         al1 = nl1[filt]
         al2 = nl2[filt]
-        func_params = params[original]
+        func_params = expanded_params[original]
         # supports multiple symmetry functions per species
 
         for paramset in func_params:
