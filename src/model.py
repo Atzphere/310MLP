@@ -4,6 +4,8 @@ import tqdm.keras
 import numpy as np
 from tqdm.auto import tqdm as tqdm_auto
 
+from keras.losses import MeanSquaredError
+
 
 # def map_fn2(fn, elems, fn_output_signature):
 #     batch_size = tf.shape(tf.nest.flatten(elems)[0])[0]
@@ -13,12 +15,30 @@ from tqdm.auto import tqdm as tqdm_auto
 #         arr = arr.write(i, fn(tf.nest.map_structure(lambda x: x[i], elems)))
 #     return arr.stack()
 def chunksum(array, window):
+    '''
+    Sums an array in adjacent non-overlapping windows of a predesignated size.
+
+    For an input array of size N,
+    The resulting output array will have shape (ceil(N / window),)
+
+    The final "chunksum" might not be summed over the correct amount of entries
+    depending on output.
+
+    '''
     length = len(array)
     needed = window - (length % window)
     finlength = length + needed
     new = np.concatenate((array, np.zeros(needed)))
 
     return new.reshape(finlength // window, window) @ np.ones(window)
+
+
+def atomic_loss(y_true, y_pred, n_atoms, model=MeanSquaredError()):
+    '''
+    Used by the MLPNet model to get loss per atom during training.
+    '''
+
+    return tf.math.truediv(model(y_true, y_pred), tf.cast(n_atoms, tf.float32))
 
 
 class ReduceRegressor(keras.Model):
@@ -29,7 +49,7 @@ class ReduceRegressor(keras.Model):
     The same subnet is used for each individual subinstance forward pass.
     '''
 
-    def __init__(self, subnet, N_features, reduction_func, reduction_params=None, ragged_processing=True):
+    def __init__(self, subnet, N_features, reduction_func, reduction_params=None, ragged_processing=True, unitwise_loss_model=None):
         '''
         pad_size : int or None, default None
             Whether or not to pad ragged inputs rather than processing them as-is.
@@ -56,6 +76,8 @@ class ReduceRegressor(keras.Model):
         self.ragged_processing = ragged_processing
         self.N_features = N_features
 
+        self.unitwise_loss_model = unitwise_loss_model
+
     def get_subnet(self):
         return self.subnet
 
@@ -75,7 +97,6 @@ class ReduceRegressor(keras.Model):
         lets us recover our original batch structure after
         vector-optimized computing. 
 
-
         if batch padding is being used, the middle dimension
         will not be ragged but rather a fixed padding size.
         since masking is only used in the case of padding,
@@ -83,9 +104,9 @@ class ReduceRegressor(keras.Model):
         "masks" should effectively only ever take the shape:
         (batch_size, M (pad size))
 
-        sequence_lengths Tensor(batch_size, pad_size (aka M_max)):
-            Used in padded batch mode to manage padded data. Otherwise,
-            this is unused.
+        # sequence_lengths Tensor(batch_size, pad_size (aka M_max)):
+        #     Used in padded batch mode to manage padded data. Otherwise,
+        #     this is unused.
 
         '''
 
@@ -95,7 +116,11 @@ class ReduceRegressor(keras.Model):
 
         # first, unpack inputs into features, masks, spans:
 
-        inputs, masks, sequence_lengths = X
+        inputs, masks, sequence_lengths, *rest = X
+
+        # handle y_true if supplied for error estimation
+
+        y_true = rest[0] if tf.is_tensor(rest[0]) else None
 
         # forward pass in ragged mode
         # since the array is not padded, we can simply map the subnet call over all instances.
@@ -134,9 +159,17 @@ class ReduceRegressor(keras.Model):
 
         # final reduction along axis 1 to get batch results:
         # shape (batch_size,)
-        return self.reduction_func(pairwise_contribs, **self.reduction_params)
 
-    def transform_dataset(self, X, y=None, sample_weight=None, batch_size=32):
+        results = self.reduction_func(pairwise_contribs, **self.reduction_params)
+
+        # calculate per-atom loss if specified and training:
+
+        if (self.unitwise_loss_model is not None):
+            self.add_loss(atomic_loss(y_true, results, sequence_lengths, self.unitwise_loss_model))
+
+        return results
+
+    def transform_dataset(self, X, y=None, sample_weight=None, batch_size=32, training=False):
         '''
         Makes the appropriate data transformations for the
         model's specified mode of operation.
@@ -164,15 +197,15 @@ class ReduceRegressor(keras.Model):
             # print(num_instances)
             # print(N_batches)
 
-            if (y is not None):
-                # build a training dataset with y included
+            if (y is not None) or training:
+                # build a training (or validation) dataset with y included
                 def __gen():
                     if sample_weight is not None:
                         for features, label, length, weights in zip(X, y, sequence_lengths, sample_weight):
-                            yield (features, np.ones((features.shape[0], 1)), [length]), label, weights
+                            yield (features, np.ones((features.shape[0], 1)), [length], label), label, weights
                     else:
                         for features, label, length in zip(X, y, sequence_lengths):
-                            yield (features, np.ones((features.shape[0], 1)), [length]), label
+                            yield (features, np.ones((features.shape[0], 1)), [length], label), label
                 if sample_weight is not None:
                     sample_weight_spec = (tf.TensorSpec(shape=(1,), dtype=tf.float32),)
                     sample_weight_shape = (1,)
@@ -184,12 +217,14 @@ class ReduceRegressor(keras.Model):
                               # masks (passed as a part of "Xtrain" to call())
                               tf.TensorSpec(shape=(None, 1),
                                             dtype=tf.float32),
-                              tf.TensorSpec(shape=(1,), dtype=tf.int32)),  # instance lengths for unstacking batched arrays
+                              tf.TensorSpec(shape=(1,), dtype=tf.int32),    # instance lengths (spans) for unstacking batched arrays
+                              tf.TensorSpec(shape=(1,), dtype=tf.float32)),   # true labels for in-call loss determination
                              tf.TensorSpec(shape=(1,), dtype=tf.float32)) + sample_weight_spec  # labels and weights
 
                 paddedshapes = (((None, self.N_features),  # features
                                  (None, 1),  # masks
-                                 (1,)),  # spans
+                                 (1,),   # spans
+                                 (1,)),  # true labels
                                 (1,)) + sample_weight_shape  # labels and weights
 
             elif (X is not None) and y is None:
@@ -255,7 +290,7 @@ class ReduceRegressor(keras.Model):
         '''
         Model.predict, but overridden to do an initial data transform
         '''
-        X, N_batches = self.transform_dataset(x, batch_size=batch_size)
+        X, N_batches = self.transform_dataset(x, batch_size=batch_size, training=False)
 
         # progbar_callback = TqdmPaddedCallback(num_batches=N_batches, epochs=None)
 
