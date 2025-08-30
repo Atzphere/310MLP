@@ -255,9 +255,9 @@ def get_angular_funcs(i_set, Rc, angfunc=behler_ang, params={}):
     # V2: this actually causes undercounting? I believe the actual summation
     # should include the degeneracy; we do not want to sort the pairs.
 
-    # pairs = [tuple(sorted(pair)) for pair in np.vstack([ns1, ns2]).T]
+    pairs = [tuple(sorted(pair)) for pair in np.vstack([ns1, ns2]).T]
 
-    pairs = [tuple(pair) for pair in np.vstack([ns1, ns2]).T]
+    # pairs = [tuple(pair) for pair in np.vstack([ns1, ns2]).T]
 
     unique_species = set(pairs)
     pairs = np.array(pairs)
@@ -266,25 +266,26 @@ def get_angular_funcs(i_set, Rc, angfunc=behler_ang, params={}):
     # sorting the input params puts them in a canonical order
     # V2: we actually want to generate get the complementary reversed pair as well
 
+    # expanded_params = params.copy()
     expanded_params = params.copy()
 
-    for key in params.keys():
-        rev = tuple(reversed(key))
-        if rev not in expanded_params.keys():
-            expanded_params.update({rev: params[key]})
+    # for key in params.keys():
+    #     rev = tuple(reversed(key))
+    #     if rev not in expanded_params.keys():
+    #         expanded_params.update({rev: params[key]})
 
-    cleaned_param_keys = expanded_params.keys()
+    # cleaned_param_keys = expanded_params.keys()
 
-    # cleaned_param_keys = set([tuple(sorted(pair)) for pair in params.keys()])
+    cleaned_param_keys = set([tuple(sorted(pair)) for pair in params.keys()])
 
-    if not unique_species.issubset(expanded_params):
+    if not unique_species.issubset(cleaned_param_keys):
         # every observed interaction type needs parameters
         raise ValueError(
             "Angular parameters were not specified for all interaction types in crystal")
 
     output_features = []
 
-    for species, original in zip(cleaned_param_keys, expanded_params):
+    for species, original in zip(cleaned_param_keys, params.keys()):
         filt = np.all(pairs == species, axis=-1)
 
         al1 = nl1[filt]

@@ -1,6 +1,9 @@
 *.dill
 *ckpt.data*
 *.ckpt.index*
+*.weights.h5
+
+!*x3v2_weighted*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

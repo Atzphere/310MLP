@@ -39,6 +39,7 @@ def parse_line(line):
     '''
     return list(map(float, line.strip().split()))
 
+
 def load_crystal(fname):
     '''
     Reads an .xsf file and returns a 2D array of the
@@ -46,9 +47,25 @@ def load_crystal(fname):
     the total DFT-calculated energy of the configuration.
 
     Also reads the included lattice vector information for nearest-neighbor corrections.
+
+    As well as the counts of each atom type; these are later used alongside single-atom energies
+    to extract cohesive energy data from the raw DFT total structure energies
+
+    returns a tuple of outputs:
+
+    configuration: a dataframe with columns corresponding to the type and position (cartesian)
+    of every atom in the structure.
+
+    energy: a float; the total structure energy.
+
+    lattice vectors: an array of the structures lattice row vectors
+
+    count: a dictionary with items {atom_name: int}; the number of each type of atom in the structure
     '''
 
-    df = pd.read_csv(fname, skiprows=9, sep="\s+", names=["Atom", "x", "y", "z"], header=None, usecols=[0, 1, 2, 3])
+    struct_df = pd.read_csv(fname, skiprows=9, sep=r"\s+", names=["Atom", "x", "y", "z"], header=None, usecols=[0, 1, 2, 3])
+
+    count = dict(struct_df["Atom"].value_counts())
 
     with open(fname, "r") as f:
         energy = float(f.readline().split(" ")[4])
@@ -59,7 +76,7 @@ def load_crystal(fname):
             LV = parse_line(f.readline())
             lattice_vectors.append(tuple(LV))
 
-    return df, energy, np.array(lattice_vectors)
+    return struct_df, energy, np.array(lattice_vectors), count
 
 
 def get_dataset(dirname, ext=".xsf", halt=-1):
@@ -67,20 +84,41 @@ def get_dataset(dirname, ext=".xsf", halt=-1):
     files = list(dt.get_files(dirname, fullpath=True, file_filter=[ext]))[:halt]
 
     with mp.Pool(mp.cpu_count()) as p:
-        configurations, energies, LVs = zip(*tqdm(p.map(load_crystal, files), total=len(files)))
+        configurations, energies, LVs, counts_list, = zip(*tqdm(p.map(load_crystal, files), total=len(files)))
+
+    # consolidate counts into a df
+    counts = pd.DataFrame(counts_list).fillna(0)
     print("Loaded.")
 
-    return configurations, np.array(energies).reshape(-1, 1), LVs
+    return configurations, np.array(energies).reshape(-1, 1), LVs, counts
 
 
-def build_features(structs, LVs, Rc, params_rad, params_ang):
+def build_features(structs, LVs, Rc, params_rad, params_ang, n_jobs=-1):
     print(fr"Building features from structure data")
 
     def process_structure(struct, LV):
         return symmetry.behler_features(struct, LV, Rc=Rc, params_rad=params_rad, params_ang=params_ang)
 
-    with mp.Pool(mp.cpu_count()) as p:
+    pool_size = n_jobs if n_jobs != -1 else mp.cpu_count()
+
+    with mp.Pool(pool_size) as p:
         features = list(tqdm(p.imap(lambda zoop: process_structure(*zoop), zip(structs, LVs)), total=len(structs)))
+
     print("Done.")
 
     return features
+
+
+def get_cohesive_energies(total_energies, counts, atomic_energies):
+    '''
+    Gets the total cohesive energies from a set of structures given their
+    total DFT structure energy (i.e. the raw label energies),
+    composition, and individual-atom DFT energies.
+    '''
+
+    if not atomic_energies.keys() >= set(counts.keys()):
+        raise ValueError("Atomic energies must be supplied for all species in a structure.")
+
+    contributions = counts.mul(atomic_energies, axis="columns", fill_value=0).sum(axis=1).values.reshape(-1, 1)
+
+    return total_energies - contributions

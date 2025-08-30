@@ -1,5 +1,6 @@
 import tensorflow as tf
-import tf_keras as keras
+# import tf_keras as keras
+import keras
 import tqdm.keras
 import numpy as np
 from tqdm.auto import tqdm as tqdm_auto
@@ -7,13 +8,6 @@ from tqdm.auto import tqdm as tqdm_auto
 from keras.losses import MeanSquaredError
 
 
-# def map_fn2(fn, elems, fn_output_signature):
-#     batch_size = tf.shape(tf.nest.flatten(elems)[0])[0]
-#     arr = tf.TensorArray(
-#         fn_output_signature.dtype, size=batch_size, element_shape=fn_output_signature.shape)
-#     for i in tf.range(batch_size):
-#         arr = arr.write(i, fn(tf.nest.map_structure(lambda x: x[i], elems)))
-#     return arr.stack()
 def chunksum(array, window):
     '''
     Sums an array in adjacent non-overlapping windows of a predesignated size.
@@ -38,7 +32,11 @@ def atomic_loss(y_true, y_pred, n_atoms, model=MeanSquaredError()):
     Used by the MLPNet model to get loss per atom during training.
     '''
 
-    return tf.math.truediv(model(y_true, y_pred), tf.cast(n_atoms, tf.float32))
+    float_n = tf.cast(n_atoms, tf.float32)
+    errors = model(tf.math.truediv(y_true, float_n),
+                   tf.math.truediv(y_pred, float_n))
+
+    return errors
 
 
 class ReduceRegressor(keras.Model):
@@ -51,22 +49,34 @@ class ReduceRegressor(keras.Model):
 
     def __init__(self, subnet, N_features, reduction_func, reduction_params=None, ragged_processing=True, unitwise_loss_model=None):
         '''
-        pad_size : int or None, default None
-            Whether or not to pad ragged inputs rather than processing them as-is.
-            Padding improves model compatibility, namely you should be able to run
-            the model in Keras 3, and make use of GPU resources.
+        subnet : keras.Model
+            The subnet to be evaluated and fitted on subinstances.
+            The output of the forward pass of this subnet will be reduced via reduction_func
+            to produce the final output shape of the ReduceRegressor.
 
-            Setting this to -1 will make the model automatically pad to size of the
-            largest instance in the ragged dimension in the training set.
+        N_features : int
+            The number of features that each substance has. Provided explicitly here
+            because it saves me from having to completely override some class methods
 
-            Note that this will inherently constraint the size of any inference features
-            to pad_size.
+        reduction_func : callable; Tensor[Tensor] -> Tensor
+            The reduction function. This should be able to take an arbitrary-length list-like tensor of
+            output tensors from the subnet, then reduce them into an output tensor with the same shape
+            as your label data.
+
+        reduction_params : dict or None, default None
+            Optional list of parameters to be passed to reduction_func
 
         ragged_processing : bool, default True
             Whether or not to handle the ragged input tensor as-is or to
             dynamically pad it on a per-batch basis. The latter allows for
             GPU computation as well as compatibility with Keras 3, but may
             be less understandable.
+
+        unitwise_loss_model : callable(Tensor) -> float; or None, default None
+            Function to evaluate loss on a per-subinstance basis. If None, the
+            loss function supplied through ReduceRegressor.compile() will be used
+            instead. Providing a loss function here 
+
 
         '''
         super().__init__()
@@ -104,10 +114,6 @@ class ReduceRegressor(keras.Model):
         "masks" should effectively only ever take the shape:
         (batch_size, M (pad size))
 
-        # sequence_lengths Tensor(batch_size, pad_size (aka M_max)):
-        #     Used in padded batch mode to manage padded data. Otherwise,
-        #     this is unused.
-
         '''
 
         # map wrapper for our subnet
@@ -119,8 +125,9 @@ class ReduceRegressor(keras.Model):
         inputs, masks, sequence_lengths, *rest = X
 
         # handle y_true if supplied for error estimation
+        truth_supplied = (len(rest) > 0) and tf.is_tensor(rest[0])
 
-        y_true = rest[0] if tf.is_tensor(rest[0]) else None
+        y_true = rest[0] if truth_supplied else None
 
         # forward pass in ragged mode
         # since the array is not padded, we can simply map the subnet call over all instances.
@@ -160,12 +167,15 @@ class ReduceRegressor(keras.Model):
         # final reduction along axis 1 to get batch results:
         # shape (batch_size,)
 
-        results = self.reduction_func(pairwise_contribs, **self.reduction_params)
+        results = self.reduction_func(
+            pairwise_contribs, **self.reduction_params)
 
         # calculate per-atom loss if specified and training:
 
-        if (self.unitwise_loss_model is not None):
-            self.add_loss(atomic_loss(y_true, results, sequence_lengths, self.unitwise_loss_model))
+        # this should correspond to the loss across the batch
+        if (self.unitwise_loss_model is not None) and truth_supplied:
+            self.add_loss(atomic_loss(y_true, results,
+                                      sequence_lengths, self.unitwise_loss_model))
 
         return results
 
@@ -176,11 +186,12 @@ class ReduceRegressor(keras.Model):
 
         '''
         if isinstance(X, tf.data.Dataset):
-            if X.element_spec.shape[0] not in (3, 4):
-                raise ValueError(
-                    "A Dataset supplied as 'x' should return a tuple of either (inputs, targets) or (inputs, targets, sample_weights).")
-            else:
-                dataset = X
+            # currently not implemented
+            raise NotImplementedError(
+                "passing datasets directly not implemented, supply raw data instead.")
+            # processed = X
+            # N_batches = None
+
         else:
             # generates a Tensorflow.data.Dataset object from X, y.
 
@@ -207,7 +218,8 @@ class ReduceRegressor(keras.Model):
                         for features, label, length in zip(X, y, sequence_lengths):
                             yield (features, np.ones((features.shape[0], 1)), [length], label), label
                 if sample_weight is not None:
-                    sample_weight_spec = (tf.TensorSpec(shape=(1,), dtype=tf.float32),)
+                    sample_weight_spec = (tf.TensorSpec(
+                        shape=(1,), dtype=tf.float32),)
                     sample_weight_shape = (1,)
                 else:
                     sample_weight_spec = ()
@@ -217,7 +229,8 @@ class ReduceRegressor(keras.Model):
                               # masks (passed as a part of "Xtrain" to call())
                               tf.TensorSpec(shape=(None, 1),
                                             dtype=tf.float32),
-                              tf.TensorSpec(shape=(1,), dtype=tf.int32),    # instance lengths (spans) for unstacking batched arrays
+                              # instance lengths (spans) for unstacking batched arrays
+                              tf.TensorSpec(shape=(1,), dtype=tf.int32),
                               tf.TensorSpec(shape=(1,), dtype=tf.float32)),   # true labels for in-call loss determination
                              tf.TensorSpec(shape=(1,), dtype=tf.float32)) + sample_weight_spec  # labels and weights
 
@@ -290,7 +303,8 @@ class ReduceRegressor(keras.Model):
         '''
         Model.predict, but overridden to do an initial data transform
         '''
-        X, N_batches = self.transform_dataset(x, batch_size=batch_size, training=False)
+        X, N_batches = self.transform_dataset(
+            x, batch_size=batch_size, training=False)
 
         # progbar_callback = TqdmPaddedCallback(num_batches=N_batches, epochs=None)
 
@@ -300,6 +314,21 @@ class ReduceRegressor(keras.Model):
         #     kwargs["callbacks"].append(progbar_callback)
 
         return super().predict(x=X, batch_size=batch_size, verbose=verbose, steps=steps, **kwargs)
+
+    def evaluate(self, x=None, y=None, **kwargs):
+        # to allow validation during training to still run
+        if isinstance(x, tf.data.Dataset):
+            return super().evaluate(x=x, **kwargs)
+
+        batch_size = kwargs.pop("batch_size", 32)
+
+        X_train = x
+        y_train = y
+        sample_weight_train = kwargs.pop("sample_weight", None)
+        eval_dataset, N_batches = self.transform_dataset(
+            X_train, y_train, sample_weight_train, batch_size=batch_size)
+
+        return super().evaluate(x=eval_dataset, **kwargs)
 
 
 class MLPNet(ReduceRegressor):
